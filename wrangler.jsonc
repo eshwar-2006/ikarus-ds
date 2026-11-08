@@ -1,0 +1,12 @@
+{
+  "name": "ikarus-2026-portal-v2",
+  "account_id": "0606e9b22cc875047f2469943ed46461",
+  "compatibility_date": "2026-10-25",
+  "workers_dev": true,
+  "main": "scripts/portal-worker.mjs",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  }
+}
