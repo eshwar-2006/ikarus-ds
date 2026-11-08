@@ -1,0 +1,26 @@
+﻿// Publish only the TechLift mission authorized in the conversation. Credentials remain in memory.
+const fs=require('fs'),path=require('path'),crypto=require('crypto'),{execFileSync}=require('child_process');
+const {root,url,key}=require('./supabase-admin.cjs')();const {loadTS}=require('../tests/helpers.cjs');const {validateQuestions,publicQuiz}=loadTS(path.join(root,'ikarus2026-portal/supabase/functions/_shared/quiz.ts'));
+const manifestPath=path.join(root,'.private-backups/revised-event/manifest.json'),manifest=JSON.parse(fs.readFileSync(manifestPath,'utf8')),source=manifest.find(q=>q.competition_code==='TECHLIFT'&&q.stage_name==='Stage 3');
+(async()=>{
+ if(crypto.createHash('sha256').update(fs.readFileSync(source.source_file)).digest('hex')!==source.source_sha256)throw Error('Source paper has changed');
+ const response=await fetch(url+'/rest/v1/quiz_drafts?select=*&competition_code=eq.TECHLIFT&stage_name=eq.Stage%203&status=in.(draft,published)',{headers:{apikey:key,Authorization:'Bearer '+key},signal:AbortSignal.timeout(30000)});if(!response.ok)throw Error('Cannot read mission');const rows=await response.json();if(rows.length!==1)throw Error('Expected exactly one mission');const q=rows[0];
+ if(!/^[-0-9a-f]{36}$/.test(q.id)||q.duration_minutes!==60||q.quiz_payload.questions.length!==6)throw Error('Mission identity or duration mismatch');
+ for(let i=0;i<6;i++)for(const field of ['text','type','marks'])if(q.quiz_payload.questions[i][field]!==source.quiz_payload.questions[i][field])throw Error('Mission differs from reviewed source; stopped to preserve edits');
+ const corrected=['score1 = int(input())','score2 = int(input())','score3 = int(input())','','total = score1 + score2 + score3','average = total / 3','','if average >= 50:','    print("Pass")','else:','    print("Fail")'].join('\n');
+ const answers=['3\n3','banana\ncherry','Error identification and explanation (15 marks): input() returns strings, so + concatenates them and division fails. The if condition also requires a colon. Corrected code (15 marks):\n\n'+corrected+'\n\nfloat(input()) is also acceptable.','63. Multiply the previous number by 2 and add 1. Equivalently, the differences double: +4, +8, +16, +32.','Wi-Fi Router / Wireless Access Point (WAP).','Judge the two-minute Campus Navigation System pitch (25 marks): understanding the problem (5), proposed solution (5), technical thinking (5), creativity (5), communication and timekeeping (5). Accept different practical solutions supported by clear technical reasoning.'];
+ const payload={...q.quiz_payload,answer_key_verified:true,questions:q.quiz_payload.questions.map((item,i)=>({...item,correct_answer:answers[i]}))};
+ payload.organizer_reference=payload.organizer_reference.replace(/Corrected Python Code:[\s\S]*?Note: Using float\(input\(\)\)/,'Corrected Python Code:\n\n'+corrected+'\n\nNote: Using float(input())');
+ const error=validateQuestions(payload.questions);if(error)throw Error(error);if(payload.questions.reduce((n,x)=>n+x.marks,0)!==100)throw Error('Marks mismatch');const delivered=publicQuiz({...q,quiz_payload:payload});if(JSON.stringify(delivered).includes('correct_answer')||JSON.stringify(delivered).includes('organizer_reference'))throw Error('Judge guide exposed in participant payload');
+ fs.writeFileSync(path.join(root,'.private-backups/techlift-stage3-before-publication.json'),JSON.stringify(q,null,2));
+ const quote=v=>"'"+String(v).replaceAll("'","''")+"'",json=v=>quote(JSON.stringify(v))+'::jsonb';
+ const sql=`begin; do $release$ declare current_row public.quiz_drafts; begin
+ select * into strict current_row from public.quiz_drafts where id=${quote(q.id)}::uuid for update;
+ if current_row.quiz_payload is distinct from ${json(q.quiz_payload)} or current_row.status<>${quote(q.status)} then raise exception 'Mission changed during verification; stopped'; end if;
+ if exists(select 1 from public.quiz_attempts where quiz_id=current_row.id) then raise exception 'Existing participant work detected; stopped'; end if;
+ update public.quiz_drafts set quiz_payload=${json(payload)},status='published',published_at=coalesce(published_at,now()),updated_at=now() where id=current_row.id;
+ insert into public.ikarus_audit_events(actor_id,action,entity_type,entity_id,competition_code,details) values(null,'round_published','quiz',current_row.id,'TECHLIFT','{"authorization":"Explicit user request to correct and publish TechLift Stage 3","method":"authorized administrative CLI","reference_answers_verified":true}'::jsonb);
+ end $release$; select competition_code,stage_name,status,duration_minutes from public.quiz_drafts where id=${quote(q.id)}::uuid; commit;`;
+ const file='.private-backups/publish-techlift-stage3.sql';fs.writeFileSync(path.join(root,file),sql);const result=execFileSync('npx.cmd',['--offline','--cache','.npm-cache','supabase','db','query','--linked','--project-ref','faxiasqmetqvdompxoxz','--file',file,'--output-format','json'],{cwd:root,shell:true,encoding:'utf8',stdio:['ignore','pipe','pipe']});
+ source.quiz_payload=payload;fs.writeFileSync(manifestPath,JSON.stringify(manifest,null,2));console.log(result);console.log('Verified and published TechLift Stage 3: 6 judge reference answers, 100 marks, 60 minutes. Other rounds unchanged.');
+})().catch(e=>{console.error(e.message);process.exitCode=1;});
