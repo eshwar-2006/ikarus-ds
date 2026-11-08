@@ -1,0 +1,40 @@
+project_id = "faxiasqmetqvdompxoxz"
+
+[functions.publish-quiz]
+verify_jwt = true
+
+[functions.get-published-quiz]
+verify_jwt = true
+
+[functions.start-quiz]
+verify_jwt = true
+
+[functions.list-published-quizzes]
+verify_jwt = true
+
+[functions.save-quiz-progress]
+verify_jwt = true
+
+[functions.submit-quiz]
+verify_jwt = true
+
+[functions.manage-results]
+verify_jwt = true
+
+[functions.manage-accounts]
+verify_jwt = true
+
+[functions.report-quiz-event]
+verify_jwt = true
+
+[functions.live-scoreboard]
+verify_jwt = true
+
+[functions.manage-qualification]
+verify_jwt = true
+
+[functions.public-results]
+verify_jwt = false
+
+[functions.ticket-login]
+verify_jwt = false

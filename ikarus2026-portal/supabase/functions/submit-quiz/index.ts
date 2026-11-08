@@ -1,0 +1,30 @@
+import { roundAccess } from '../_shared/qualification.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { validAnswers, scoreQuestions, rankAttempts } from '../_shared/quiz.ts';
+const cors={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type, x-retry-count, traceparent, tracestate, baggage','Access-Control-Allow-Methods':'POST, OPTIONS','Content-Type':'application/json'};
+const reply=(s:number,b:unknown)=>new Response(JSON.stringify(b),{status:s,headers:cors});
+const norm=(v:unknown)=>String(v??'').trim().toLowerCase();
+Deno.serve(async(req)=>{
+ if(req.method==='OPTIONS')return new Response('ok',{headers:cors});if(req.method!=='POST')return reply(405,{error:'POST required'});
+ const url=Deno.env.get('SUPABASE_URL'),anon=Deno.env.get('SUPABASE_ANON_KEY'),service=Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');if(!url||!anon||!service)return reply(500,{error:'Supabase Edge Function secrets are missing'});
+ const token=(req.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!token)return reply(401,{error:'Authentication required'});
+ const auth=createClient(url,anon,{auth:{persistSession:false}});const {data:{user},error:ae}=await auth.auth.getUser(token);if(ae||!user)return reply(401,{error:'Invalid session'});
+ const admin=createClient(url,service,{auth:{persistSession:false}});const {data:profile}=await admin.from('profiles').select('role,competition_code').eq('id',user.id).single();if(!profile||!['participant','team_member','team'].includes(profile.role))return reply(403,{error:'Team account required'});
+ let b:any;try{b=await req.json()}catch{return reply(400,{error:'Invalid JSON'});}if(!b||typeof b.quiz_id!=='string'||!b.answers||typeof b.answers!=='object'||Array.isArray(b.answers))return reply(400,{error:'quiz_id and answers object are required'});
+ if(!validAnswers(b.answers))return reply(400,{error:'Answers must be strings with numeric question positions; each answer may contain at most 30000 characters'});
+ const {data:q,error}=await admin.from('quiz_drafts').select('id,competition_code,stage_name,quiz_payload,status,duration_minutes').eq('id',b.quiz_id).eq('status','published').single();if(error||!q)return reply(404,{error:'Published stage not found'});if(profile.competition_code!==q.competition_code)return reply(403,{error:'This stage is not assigned to your competition'});
+ try{const access=await roundAccess(admin,q,user.id);if(!access.allowed)return reply(403,{error:access.message});}catch{return reply(503,{error:'Could not verify round eligibility. Try again.'});}
+ const {data:attempt}=await admin.from('quiz_attempts').select('id,status,started_at,deadline_at,answers').eq('quiz_id',q.id).eq('user_id',user.id).maybeSingle();
+ if(!attempt)return reply(409,{error:'Start the stage before submitting'});
+ if(attempt.status!=='in_progress')return reply(409,{error:'This attempt has already been submitted'});
+ const timedOut=!attempt.deadline_at||Date.now()>new Date(attempt.deadline_at).getTime();
+ if(timedOut)b.answers=attempt.answers||{};
+ const questions=Array.isArray(q.quiz_payload?.questions)?q.quiz_payload.questions:[];if(!questions.length)return reply(409,{error:'This stage has no valid questions'});
+ const {score,max_score:max,manual_review_required:manual}=scoreQuestions(questions,b.answers);
+ const {data:saved,error:saveErr}=await admin.from('quiz_attempts').update({answers:b.answers,score,max_score:max,manual_review_required:manual,status:'submitted',submitted_at:new Date().toISOString()}).eq('id',attempt.id).eq('status','in_progress').select('id').maybeSingle();
+ if(saveErr||!saved)return reply(409,{error:'Submission could not be finalized. Refresh and contact an organizer if this persists.'});
+ await admin.from('ikarus_audit_events').insert({actor_id:user.id,action:'quiz_submitted',entity_type:'quiz_attempt',entity_id:attempt.id,competition_code:q.competition_code,details:{quiz_id:q.id,score,max_score:max,manual_review_required:manual}});
+ const {data:round}=manual?{data:[]}:await admin.from('quiz_attempts').select('user_id,status,score,reviewed_score,manual_review_required,started_at,submitted_at').eq('quiz_id',q.id).neq('status','in_progress');
+ const rank=manual?null:rankAttempts(round||[],q.quiz_payload?.tie_breaker==='elapsed_time').get(user.id)??null;
+ return reply(200,{success:true,score:manual?null:score,rank,max_score:max,manual_review_required:manual,message:timedOut?'Time expired. Your last autosaved answers were submitted.':manual?'Submitted. Awaiting organizer judging.':'Submitted and scored.'});
+});
